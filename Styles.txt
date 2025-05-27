@@ -1,0 +1,11 @@
+# cores de botão
+
+ButtonStyle.primary → azul
+
+ButtonStyle.secondary → cinza
+
+ButtonStyle.success → verde
+
+ButtonStyle.danger → vermelho
+
+ButtonStyle.link → botão que abre um link (não dispara callback)
