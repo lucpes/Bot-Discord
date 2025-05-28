@@ -3,10 +3,37 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 import os
+import asyncio               # contador de tempo
+from datetime import datetime
+import pytz
+
+tz = pytz.timezone('America/Sao_Paulo')
+timestamp = datetime.now(tz)
+print(datetime.now(tz))
+
+# timestamp = datetime.now(tz)
+# timestamp = data.get("timestamp")
+
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+#============================================================================================================================================#
+
+                                                                # Firebase
+
+import firebase_admin
+from firebase_admin import credentials, firestore
+#from google.cloud import firestore
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate(os.getenv("FIREBASE_KEY_PATH"))
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+#============================================================================================================================================#
+
+# Ligar o Bot
 
 class Bot(discord.Client):
     def __init__(self):
@@ -22,6 +49,11 @@ class Bot(discord.Client):
 
 bot = Bot()
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("Você não tem permissão para usar este comando.", ephemeral=True)
+
 #============================================================================================================================================#
 
 # Ligar os botões quando o bot inicializa ou reinicia !
@@ -33,9 +65,20 @@ async def on_ready():
     # Registrar a View persistente
     bot.add_view(RegisterButton())
     bot.add_view(ApproveButton())
-
+    bot.add_view(FarmView())
+    
 #============================================================================================================================================#
 
+# Função que verifica se o autor tem o cargo permitido
+
+def check_cargo_permitido(nome_cargo: str):
+    async def predicate(interaction: discord.Interaction):
+        if interaction.user.guild_permissions.administrator:
+            return True  # admins sempre podem
+        return any(role.name == nome_cargo for role in interaction.user.roles)
+    return app_commands.check(predicate)
+
+#============================================================================================================================================#
 
 
 
@@ -45,6 +88,7 @@ class RegisterButton(discord.ui.View):                            # Classe do Bo
 
     @discord.ui.button(
         label="Registrar",
+        emoji="<:register2:1377304024923115632>",
         style=discord.ButtonStyle.secondary,
         custom_id="register_button"  # ❗ custom_id fixo = necessário para persistência
     )
@@ -70,7 +114,7 @@ class ApproveButton(discord.ui.View):                             # Classe do Bo
         footer_text = embed.footer.text
 
         if "ID do usuário:" not in footer_text:
-            await interaction.response.send_message("❌ ID do usuário não encontrado no embed.", ephemeral=True)
+            await interaction.response.send_message("<:remove:1377347264963547157> ID do usuário não encontrado no embed.", ephemeral=True)
             return
 
         user_id = int(footer_text.split("ID do usuário:")[1].strip())
@@ -82,7 +126,7 @@ class ApproveButton(discord.ui.View):                             # Classe do Bo
         cargo_gerente = guild.get_role(1377010279640076368)  # 🚨 Substitua com o ID real do cargo Gerente
 
         if not member or not cargo_aprovado:
-            await interaction.response.send_message("❌ Membro ou cargo não encontrado.", ephemeral=True)
+            await interaction.response.send_message("<:remove:1377347264963547157> Membro ou cargo não encontrado.", ephemeral=True)
             return
 
         # ✅ Extrair nome e ID do embed
@@ -96,10 +140,10 @@ class ApproveButton(discord.ui.View):                             # Classe do Bo
             await member.add_roles(cargo_aprovado, reason="Registro aprovado")
             await member.edit(nick=novo_apelido, reason="Apelido ajustado após aprovação")
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Permissões insuficientes para modificar o usuário.", ephemeral=True)
+            await interaction.response.send_message("<:remove:1377347264963547157> Permissões insuficientes para modificar o usuário.", ephemeral=True)
             return
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Erro ao modificar o usuário: {e}", ephemeral=True)
+            await interaction.response.send_message(f"<:remove:1377347264963547157> Erro ao modificar o usuário: {e}", ephemeral=True)
             return
 
         # ✅ Criar canal em "Farm"
@@ -133,10 +177,29 @@ class ApproveButton(discord.ui.View):                             # Classe do Bo
             f"<:verifica:1376988195832729681> **┃ Usuário aprovado com sucesso!**\n📁 Canal criado: {canal.mention}",
             ephemeral=True
         )
+        
+        embed_farm = discord.Embed(                                                              # Cria o Painel de farm individual no canal do membro
+            title="📦 Painel de Farm",
+            description=f"Bem-vindo {member.mention}! Aqui é seu controle pessoal de farm.\nUtilize os botões abaixo para interagir com o sistema de farm.",
+            color=discord.Color.blurple()
+        )
+        embed_farm.set_thumbnail(url=member.avatar.url)
+        
+        user = await interaction.client.fetch_user(member.id)  # ou await member.fetch()
+
+        if user.banner:
+            banner_url = user.banner.url
+            print(banner_url)  # ou use no embed
+        else:
+            pass
+        if user.banner:
+            embed_farm.set_image(url=user.banner.url)
 
 
+        await canal.send(embed=embed_farm, view=FarmView())
 
-class RegisterModal(discord.ui.Modal, title="📜Formulário de Registro📜"):              # Classe do formulário de registro
+
+class RegisterModal(discord.ui.Modal, title="­­  ­­­­­┃𝐅𝐨𝐫𝐦𝐮𝐥á𝐫𝐢𝐨 𝐝𝐞 𝐑𝐞𝐠𝐢𝐬𝐭𝐫𝐨┃"):              # Classe do formulário de registro📜
     nome = discord.ui.TextInput(label="👤Qual Seu nome?", 
                                 placeholder="Digite seu nome...", 
                                 required=True)
@@ -197,6 +260,7 @@ class RegisterModal(discord.ui.Modal, title="📜Formulário de Registro📜"): 
         
                    
 @bot.tree.command(name="painel_registro", description="Envia o painel fixo de registro")    # Criar o painel de registro // Depois precisa criar uma função com todos os paineis
+@check_cargo_permitido("Gerente")                                       # Substitua pelo nome exato do cargo
 async def send_embed(interaction: discord.Interaction):
     embed_register = discord.Embed(
         title="CENTRAL DE REGISTRO・Chicletões Norte",
@@ -211,14 +275,147 @@ async def send_embed(interaction: discord.Interaction):
 
     view = RegisterButton()
     await interaction.channel.send(embed=embed_register, view=view)
-    await interaction.response.send_message("Embed enviado com sucesso!", ephemeral=True)
+    await interaction.response.send_message("Painel enviado com sucesso!", ephemeral=True)
     
     
+# 🔘 Botões fora da classe ApproveButton
+class FarmButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="📤 Enviar Farm", style=discord.ButtonStyle.secondary, custom_id="farm_button",)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(FarmModal())
+
+class PainelFarmButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="📊 Painel de Farm", style=discord.ButtonStyle.secondary, custom_id="painel_farm_button")
+
+    async def callback(self, interaction: discord.Interaction):
+        user_name = str(interaction.user)
+        bot_id = str(interaction.client.user.id)
+
+        # Caminho para o documento do usuário
+        user_ref = db.collection(bot_id) \
+                     .document("farms") \
+                     .collection("users") \
+                     .document(user_name)
+
+        doc = user_ref.get()
+
+        if doc.exists:
+            data = doc.to_dict()
+
+            embed = discord.Embed(
+                title="📊 Painel de Farm",
+                description=f"Usuário: **{user_name}**",
+                color=discord.Color.blurple()
+            )
+
+            embed.add_field(name="Valor 1", value=str(data.get("valor1", 0)), inline=True)
+            embed.add_field(name="Valor 2", value=str(data.get("valor2", 0)), inline=True)
+            embed.add_field(name="Valor 3", value=str(data.get("valor3", 0)), inline=True)
+            embed.add_field(name="Valor 4", value=str(data.get("valor4", 0)), inline=True)
+
+            timestamp = datetime.now(tz)
+            if timestamp:
+                embed.set_footer(text=f"Última atualização: {timestamp.strftime('%d/%m/%Y %H:%M:%S')}")
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "<:remove:1377347264963547157> Você ainda não enviou nenhum farm para exibir.",
+                ephemeral=True
+            )
+
+# ✅ View que junta os botões
+class FarmView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(FarmButton())
+        self.add_item(PainelFarmButton())
 
     
-    
-    
+# Modal de envio de farm
+class FarmModal(discord.ui.Modal, title="ㅤㅤㅤ┃ Enviar Farm ┃"):
+    def __init__(self, valor1="", valor2="", valor3="", valor4=""):
+        super().__init__(timeout=None)
 
+        self.valor1 = discord.ui.TextInput(label="Valor 1", placeholder="Digite um número", default=valor1)
+        self.valor2 = discord.ui.TextInput(label="Valor 2", placeholder="Digite um número", default=valor2)
+        self.valor3 = discord.ui.TextInput(label="Valor 3", placeholder="Digite um número", default=valor3)
+        self.valor4 = discord.ui.TextInput(label="Valor 4", placeholder="Digite um número", default=valor4)
+
+        self.add_item(self.valor1)
+        self.add_item(self.valor2)
+        self.add_item(self.valor3)
+        self.add_item(self.valor4)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            v1 = int(self.valor1.value)
+            v2 = int(self.valor2.value)
+            v3 = int(self.valor3.value)
+            v4 = int(self.valor4.value)
+
+            bot_id = str(interaction.client.user.id)
+            user_name = str(interaction.user)  # Ex: João#1234
+
+            user_ref = db.collection(bot_id) \
+                         .document("farms") \
+                         .collection("users") \
+                         .document(user_name)
+
+            doc = user_ref.get()
+
+            if doc.exists:
+                data = doc.to_dict()
+                updated_data = {
+                    "valor1": data.get("valor1", 0) + v1,
+                    "valor2": data.get("valor2", 0) + v2,
+                    "valor3": data.get("valor3", 0) + v3,
+                    "valor4": data.get("valor4", 0) + v4,
+                    "user_id": interaction.user.id,
+                    "timestamp": firestore.SERVER_TIMESTAMP
+                }
+                user_ref.update(updated_data)
+            else:
+                new_data = {
+                    "valor1": v1,
+                    "valor2": v2,
+                    "valor3": v3,
+                    "valor4": v4,
+                    "user_id": interaction.user.id,
+                    "timestamp": firestore.SERVER_TIMESTAMP
+                }
+                user_ref.set(new_data)
+
+            await interaction.response.send_message(
+                f"✅ Valores enviados com sucesso e somados no banco: {v1}, {v2}, {v3}, {v4}",
+                ephemeral=True
+            )
+
+        except ValueError:
+            valor1 = self.valor1.value
+            valor2 = self.valor2.value
+            valor3 = self.valor3.value
+            valor4 = self.valor4.value
+
+            class CorrigirView(discord.ui.View):
+                @discord.ui.button(label="🔁 Corrigir valores", style=discord.ButtonStyle.danger)
+                async def corrigir(self, button_interaction: discord.Interaction, button: discord.ui.Button):
+                    await button_interaction.response.send_modal(
+                        FarmModal(valor1, valor2, valor3, valor4)
+                    )
+
+            await interaction.response.send_message(
+                "<:remove:1377347264963547157> Um ou mais valores são inválidos. Por favor, insira apenas números inteiros.",
+                view=CorrigirView(),
+                ephemeral=True
+            )
+
+
+
+    
 
 
 @bot.tree.command(name="teste", description="descrição teste")

@@ -9,3 +9,11 @@ ButtonStyle.success → verde
 ButtonStyle.danger → vermelho
 
 ButtonStyle.link → botão que abre um link (não dispara callback)
+
+color=discord.Color.from_str("#00FF00") # Verde forte
+
+===========================================================================================
+
+Espaço vazio " "-"ㅤ"-"ㅤㅤ"
+
+"user_id": interaction.user.id,
