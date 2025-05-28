@@ -6,6 +6,7 @@ import os
 import asyncio               # contador de tempo
 from datetime import datetime
 import pytz
+import io                    # carregar imagem
 
 tz = pytz.timezone('America/Sao_Paulo')
 timestamp = datetime.now(tz)
@@ -46,8 +47,9 @@ class Bot(discord.Client):
 
     async def on_ready(self):
         print(f"O Bot {self.user} foi ligado com sucesso")
-
+        
 bot = Bot()
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -284,7 +286,7 @@ class FarmButton(discord.ui.Button):
         super().__init__(label="📤 Enviar Farm", style=discord.ButtonStyle.secondary, custom_id="farm_button",)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(FarmModal())
+        await interaction.response.send_modal(FarmModal(interaction.client))
 
 class PainelFarmButton(discord.ui.Button):
     def __init__(self):
@@ -336,84 +338,123 @@ class FarmView(discord.ui.View):
 
     
 # Modal de envio de farm
-class FarmModal(discord.ui.Modal, title="ㅤㅤㅤ┃ Enviar Farm ┃"):
-    def __init__(self, valor1="", valor2="", valor3="", valor4=""):
-        super().__init__(timeout=None)
 
-        self.valor1 = discord.ui.TextInput(label="Valor 1", placeholder="Digite um número", default=valor1)
-        self.valor2 = discord.ui.TextInput(label="Valor 2", placeholder="Digite um número", default=valor2)
-        self.valor3 = discord.ui.TextInput(label="Valor 3", placeholder="Digite um número", default=valor3)
-        self.valor4 = discord.ui.TextInput(label="Valor 4", placeholder="Digite um número", default=valor4)
+LOG_CHANNEL_ID = 1377378645219344465
 
+class FarmModal(discord.ui.Modal, title="Enviar Farm"):
+    def __init__(self, bot, valor1="", valor2="", valor3="", valor4=""):
+        super().__init__()
+        self.bot = bot
+        self.valor1 = discord.ui.TextInput(label="Valor 1", default=valor1)
+        self.valor2 = discord.ui.TextInput(label="Valor 2", default=valor2)
+        self.valor3 = discord.ui.TextInput(label="Valor 3", default=valor3)
+        self.valor4 = discord.ui.TextInput(label="Valor 4", default=valor4)
         self.add_item(self.valor1)
         self.add_item(self.valor2)
         self.add_item(self.valor3)
         self.add_item(self.valor4)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "📸 Agora envie um print para comprovar seu farm.", ephemeral=True
+        )
+
+        def check(m):
+            return m.author.id == interaction.user.id and m.attachments and m.channel.id == interaction.channel.id
+
         try:
-            v1 = int(self.valor1.value)
-            v2 = int(self.valor2.value)
-            v3 = int(self.valor3.value)
-            v4 = int(self.valor4.value)
+            message = await self.bot.wait_for("message", check=check, timeout=60)
+            image = message.attachments[0]
+            image_bytes = await image.read()
+            await message.delete()
 
-            bot_id = str(interaction.client.user.id)
-            user_name = str(interaction.user)  # Ex: João#1234
+            log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
 
-            user_ref = db.collection(bot_id) \
-                         .document("farms") \
-                         .collection("users") \
-                         .document(user_name)
+            embed = discord.Embed(
+                title="📤 Farm aguardando aprovação",
+                description=f"Usuário: **{interaction.user}**",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Valor 1", value=self.valor1.value)
+            embed.add_field(name="Valor 2", value=self.valor2.value)
+            embed.add_field(name="Valor 3", value=self.valor3.value)
+            embed.add_field(name="Valor 4", value=self.valor4.value)
 
-            doc = user_ref.get()
-
-            if doc.exists:
-                data = doc.to_dict()
-                updated_data = {
-                    "valor1": data.get("valor1", 0) + v1,
-                    "valor2": data.get("valor2", 0) + v2,
-                    "valor3": data.get("valor3", 0) + v3,
-                    "valor4": data.get("valor4", 0) + v4,
-                    "user_id": interaction.user.id,
-                    "timestamp": firestore.SERVER_TIMESTAMP
-                }
-                user_ref.update(updated_data)
-            else:
-                new_data = {
-                    "valor1": v1,
-                    "valor2": v2,
-                    "valor3": v3,
-                    "valor4": v4,
-                    "user_id": interaction.user.id,
-                    "timestamp": firestore.SERVER_TIMESTAMP
-                }
-                user_ref.set(new_data)
-
-            await interaction.response.send_message(
-                f"✅ Valores enviados com sucesso e somados no banco: {v1}, {v2}, {v3}, {v4}",
-                ephemeral=True
+            await log_channel.send(
+                embed=embed,
+                file=discord.File(io.BytesIO(image_bytes), filename="farm.png"),
+                view=AprovacaoView(
+                    user_id=interaction.user.id,
+                    v1=int(self.valor1.value),
+                    v2=int(self.valor2.value),
+                    v3=int(self.valor3.value),
+                    v4=int(self.valor4.value)
+                )
             )
 
-        except ValueError:
-            valor1 = self.valor1.value
-            valor2 = self.valor2.value
-            valor3 = self.valor3.value
-            valor4 = self.valor4.value
+        except asyncio.TimeoutError:
+            await interaction.followup.send("⏰ Tempo esgotado. Envio cancelado.", ephemeral=True)
 
-            class CorrigirView(discord.ui.View):
-                @discord.ui.button(label="🔁 Corrigir valores", style=discord.ButtonStyle.danger)
-                async def corrigir(self, button_interaction: discord.Interaction, button: discord.ui.Button):
-                    await button_interaction.response.send_modal(
-                        FarmModal(valor1, valor2, valor3, valor4)
-                    )
+pending_farms = {} 
 
-            await interaction.response.send_message(
-                "<:remove:1377347264963547157> Um ou mais valores são inválidos. Por favor, insira apenas números inteiros.",
-                view=CorrigirView(),
-                ephemeral=True
-            )
+class AprovacaoView(discord.ui.View):
+    def __init__(self, user_id, v1, v2, v3, v4):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.v1, self.v2, self.v3, self.v4 = v1, v2, v3, v4
 
+    @discord.ui.button(label=" Aprovar", style=discord.ButtonStyle.success, emoji="<:verifica2:1376988479891837009>")
+    async def aprovar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("<:remove1:1377385311428022446> Você não tem permissão para aprovar.", ephemeral=True)
+            return
 
+        bot_id = str(interaction.client.user.id)
+        user = interaction.guild.get_member(self.user_id)
+        user_name = str(user)
+
+        user_ref = db.collection(bot_id).document("farms").collection("users").document(user_name)
+        doc = user_ref.get()
+
+        if doc.exists:
+            data = doc.to_dict()
+            updated_data = {
+                "valor1": data.get("valor1", 0) + self.v1,
+                "valor2": data.get("valor2", 0) + self.v2,
+                "valor3": data.get("valor3", 0) + self.v3,
+                "valor4": data.get("valor4", 0) + self.v4,
+                "user_id": self.user_id,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            }
+            user_ref.update(updated_data)
+        else:
+            new_data = {
+                "valor1": self.v1,
+                "valor2": self.v2,
+                "valor3": self.v3,
+                "valor4": self.v4,
+                "user_id": self.user_id,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            }
+            user_ref.set(new_data)
+
+        button.label = "Aprovado"
+        button.emoji = "<:verifica2:1376988479891837009>"
+        button.disabled = True
+        button.style = discord.ButtonStyle.success
+
+        # Atualiza a view no Discord (edita a mensagem com a view modificada)
+        await interaction.response.edit_message(view=self)
+
+        await interaction.followup.send("✅ Farm aprovado e registrado com sucesso!", ephemeral=True)
+
+    @discord.ui.button(label="❌ Rejeitar", style=discord.ButtonStyle.danger)
+    async def rejeitar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("❌ Você não tem permissão para rejeitar.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("🚫 Farm rejeitado. Nenhum dado foi salvo.", ephemeral=True)
 
     
 
