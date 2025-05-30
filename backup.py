@@ -1,3 +1,5 @@
+# Backup do dia 29/05
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -7,6 +9,7 @@ import asyncio               # contador de tempo
 from datetime import datetime
 import pytz
 import io                    # carregar imagem
+import uuid
 
 tz = pytz.timezone('America/Sao_Paulo')
 timestamp = datetime.now(tz)
@@ -63,6 +66,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @bot.event
 async def on_ready():
     print(f"Bot está online como {bot.user}!")
+    await restaurar_farms_pendentes(bot)  #  restaura os farms pendentes
     
     # Registrar a View persistente
     bot.add_view(RegisterButton())
@@ -286,7 +290,7 @@ class FarmButton(discord.ui.Button):
         super().__init__(label="📤 Enviar Farm", style=discord.ButtonStyle.secondary, custom_id="farm_button",)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(FarmModal())
+        await interaction.response.send_modal(FarmModal(interaction.client))
 
 class PainelFarmButton(discord.ui.Button):
     def __init__(self):
@@ -338,113 +342,240 @@ class FarmView(discord.ui.View):
 
     
 # Modal de envio de farm
+
+LOG_CHANNEL_ID = 1377378645219344465
+
 class FarmModal(discord.ui.Modal, title="ㅤㅤㅤ┃ Enviar Farm ┃"):
-    def __init__(self, valor1="", valor2="", valor3="", valor4=""):
-        super().__init__(timeout=None)
-
-        self.valor1 = discord.ui.TextInput(label="Valor 1", placeholder="Digite um número", default=valor1)
-        self.valor2 = discord.ui.TextInput(label="Valor 2", placeholder="Digite um número", default=valor2)
-        self.valor3 = discord.ui.TextInput(label="Valor 3", placeholder="Digite um número", default=valor3)
-        self.valor4 = discord.ui.TextInput(label="Valor 4", placeholder="Digite um número", default=valor4)
-
+    def __init__(self, bot, valor1="", valor2="", valor3="", valor4=""):
+        super().__init__()
+        self.bot = bot
+        self.valor1 = discord.ui.TextInput(label="Valor 1", default=valor1)
+        self.valor2 = discord.ui.TextInput(label="Valor 2", default=valor2)
+        self.valor3 = discord.ui.TextInput(label="Valor 3", default=valor3)
+        self.valor4 = discord.ui.TextInput(label="Valor 4", default=valor4)
         self.add_item(self.valor1)
         self.add_item(self.valor2)
         self.add_item(self.valor3)
         self.add_item(self.valor4)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "📸 Agora envie um print para comprovar seu farm.", ephemeral=True
+        )
+
+        def check(m):
+            return (
+                m.author.id == interaction.user.id and 
+                m.attachments and 
+                m.channel.id == interaction.channel.id
+            )
+
         try:
-            v1 = int(self.valor1.value)
-            v2 = int(self.valor2.value)
-            v3 = int(self.valor3.value)
-            v4 = int(self.valor4.value)
+            message = await self.bot.wait_for("message", check=check, timeout=60)
+            image = message.attachments[0]
+            image_bytes = await image.read()
+            await message.delete()
 
-            await interaction.response.send_message(
-                "📸 Envie agora um print da tela neste canal para registrar no log.\n⏳ Você tem 60 segundos.",
-                ephemeral=True
+            # 🔹 Gera o farmID
+            farm_id = str(uuid.uuid4())
+
+            LOG_CHANNEL_ID = 1377378645219344465
+            log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+
+            embed = discord.Embed(
+                title="📤 **Farm aguardando aprovação**",
+                description=f"Usuário: **{interaction.guild.get_member(interaction.user.id).display_name}**",
+                color=discord.Color.orange()
             )
+            embed.add_field(name="Valor 1", value=self.valor1.value)
+            embed.add_field(name="Valor 2", value=self.valor2.value)
+            embed.add_field(name="Valor 3", value=self.valor3.value)
+            embed.add_field(name="Valor 4", value=self.valor4.value)
+            embed.set_image(url="attachment://farm.png")
 
-            def check(m):
-                return (
-                    m.author.id == interaction.user.id and
-                    m.channel.id == interaction.channel.id and
-                    m.attachments and
-                    m.attachments[0].content_type.startswith("image/")
+            # 🔹 Envia embed com botões
+            msg = await log_channel.send(
+                embed=embed,
+                file=discord.File(io.BytesIO(image_bytes), filename="farm.png"),
+                view=AprovacaoView(
+                    user_id=interaction.user.id,
+                    v1=int(self.valor1.value),
+                    v2=int(self.valor2.value),
+                    v3=int(self.valor3.value),
+                    v4=int(self.valor4.value)
                 )
+            )
+            
+            farm_id = str(msg.id)
 
-            try:
-                msg = await interaction.client.wait_for("message", timeout=60.0, check=check)
-                attachment = msg.attachments[0]
-                image_bytes = await attachment.read()
+            # 🔹 Salva no Firebase sob o ID do bot
+            bot_id = str(self.bot.user.id)
+            db.collection(bot_id).document("farmsPendentes").collection("items").document(farm_id).set({
+                "user_id": interaction.user.id,
+                "valor1": int(self.valor1.value),
+                "valor2": int(self.valor2.value),
+                "valor3": int(self.valor3.value),
+                "valor4": int(self.valor4.value),
+                "farm_id": farm_id,
+                "mensagem_id": msg.id,
+                "canal_id": msg.channel.id,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
 
-                # Apagar a imagem do usuário
-                await msg.delete()
+            canal_embed = discord.Embed(
+                title="📦 **・Farm Enviado Com Sucesso**",
+                description="Seu farm foi enviado e está aguardando aprovação.",
+                color=discord.Color.orange()
+            )
+            canal_embed.set_thumbnail(url="https://emojitool.com/img/microsoft/windows-11-23h2-June-2024/windows-11-23h2-june-2024-update-552.png")
+            canal_embed.set_image(url="attachment://farm.png")
+            canal_embed.add_field(name="**Status:**", value="Pendente <a:loading:1377690003550896289>")
 
-                # Enviar no canal de log
-                CANAL_LOG_ID = 1377368578856325273  # Substitua com o ID real
-                canal_log = interaction.client.get_channel(CANAL_LOG_ID)
-                if canal_log:
-                    await canal_log.send(
-                        content=f"🖼️ Print de farm enviado por **{interaction.user}**.",
-                        file=discord.File(fp=io.BytesIO(image_bytes), filename="farm_print.png")
-                    )
-                else:
-                    await interaction.followup.send("⚠️ Canal de log não encontrado.", ephemeral=True)
-                    return
-
-                # Agora sim: salvar no banco
-                bot_id = str(interaction.client.user.id)
-                user_name = str(interaction.user)
-                user_ref = db.collection(bot_id).document("farms").collection("users").document(user_name)
-                doc = user_ref.get()
-
-                if doc.exists:
-                    data = doc.to_dict()
-                    updated_data = {
-                        "valor1": data.get("valor1", 0) + v1,
-                        "valor2": data.get("valor2", 0) + v2,
-                        "valor3": data.get("valor3", 0) + v3,
-                        "valor4": data.get("valor4", 0) + v4,
-                        "user_id": interaction.user.id,
-                        "timestamp": firestore.SERVER_TIMESTAMP
-                    }
-                    user_ref.update(updated_data)
-                else:
-                    new_data = {
-                        "valor1": v1,
-                        "valor2": v2,
-                        "valor3": v3,
-                        "valor4": v4,
-                        "user_id": interaction.user.id,
-                        "timestamp": firestore.SERVER_TIMESTAMP
-                    }
-                    user_ref.set(new_data)
-
-                await interaction.followup.send("<:verifica:1376988195832729681> Farm registrado com sucesso.", ephemeral=True)
-
-            except asyncio.TimeoutError:
-                await interaction.followup.send("⏰ Tempo esgotado! Nenhum print foi enviado. O farm não foi salvo.", ephemeral=True)
-
-        except ValueError:
-            valor1 = self.valor1.value
-            valor2 = self.valor2.value
-            valor3 = self.valor3.value
-            valor4 = self.valor4.value
-
-            class CorrigirView(discord.ui.View):
-                @discord.ui.button(label="🔁 Corrigir valores", style=discord.ButtonStyle.danger)
-                async def corrigir(self, button_interaction: discord.Interaction, button: discord.ui.Button):
-                    await button_interaction.response.send_modal(
-                        FarmModal(valor1, valor2, valor3, valor4)
-                    )
-
-            await interaction.response.send_message(
-                "<:remove:1377347264963547157> Um ou mais valores são inválidos. Por favor, insira apenas números inteiros.",
-                view=CorrigirView(),
-                ephemeral=True
+            await interaction.channel.send(
+                embed=canal_embed,
+                file=discord.File(io.BytesIO(image_bytes), filename="farm.png")
             )
 
+        except asyncio.TimeoutError:
+            await interaction.followup.send("⏰ Tempo esgotado. Envio cancelado.", ephemeral=True)
+            
+            
+# Lógica para restaurar os farms pendentes quando o bot reiniciar
 
+pending_farms = {} 
+
+async def restaurar_farms_pendentes(bot):
+    bot_id = str(bot.user.id)
+    farms_ref = db.collection(bot_id).document("farmsPendentes").collection("items")
+    farms = farms_ref.stream()
+
+    for doc in farms:
+        data = doc.to_dict()
+
+        try:
+            canal = bot.get_channel(data["canal_id"])
+            if canal is None:
+                print(f"Canal {data['canal_id']} não encontrado.")
+                continue
+
+            mensagem = await canal.fetch_message(data["mensagem_id"])
+            if mensagem is None:
+                print(f"Mensagem {data['mensagem_id']} não encontrada.")
+                continue
+
+            view = AprovacaoView(
+                user_id=data["user_id"],
+                v1=data["valor1"],
+                v2=data["valor2"],
+                v3=data["valor3"],
+                v4=data["valor4"]
+            )
+            await mensagem.edit(view=view)
+            print(f"✅ Farm {doc.id} restaurado com sucesso.")
+
+        except Exception as e:
+            print(f"Erro ao restaurar farm {doc.id}: {e}")
+
+
+class AprovacaoView(discord.ui.View):
+    def __init__(self, user_id, v1, v2, v3, v4):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.v1 = v1
+        self.v2 = v2
+        self.v3 = v3
+        self.v4 = v4
+
+        # Botões definidos manualmente
+        self.aprovar_button = discord.ui.Button(
+            label="Aprovar",
+            emoji="<:verifica2:1376988479891837009>",
+            style=discord.ButtonStyle.success
+        )
+        self.rejeitar_button = discord.ui.Button(
+            label="Rejeitar",
+            emoji="<:remove1:1377385311428022446>",
+            style=discord.ButtonStyle.danger
+        )
+
+        self.aprovar_button.callback = self.aprovar
+        self.rejeitar_button.callback = self.rejeitar
+
+        self.add_item(self.aprovar_button)
+        self.add_item(self.rejeitar_button)
+
+    async def aprovar(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("<:remove:1377347264963547157> Você não tem permissão para aprovar.", ephemeral=True)
+            return
+
+        # Firebase
+        bot_id = str(interaction.client.user.id)
+        user = interaction.guild.get_member(self.user_id)
+        user_name = str(user)
+
+        user_ref = db.collection(bot_id).document("farms").collection("users").document(user_name)
+        doc = user_ref.get()
+
+        if doc.exists:
+            data = doc.to_dict()
+            user_ref.update({
+                "valor1": data.get("valor1", 0) + self.v1,
+                "valor2": data.get("valor2", 0) + self.v2,
+                "valor3": data.get("valor3", 0) + self.v3,
+                "valor4": data.get("valor4", 0) + self.v4,
+                "user_id": self.user_id,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+        else:
+            user_ref.set({
+                "valor1": self.v1,
+                "valor2": self.v2,
+                "valor3": self.v3,
+                "valor4": self.v4,
+                "user_id": self.user_id,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+            
+        # Remove o farm pendente do Firebase
+        bot_id = str(interaction.client.user.id)
+        farm_id = str(interaction.message.id)
+
+        print(f"[DEBUG] Deletando farmID: {farm_id} do bot {bot_id}")
+
+        db.collection(bot_id).document("farmsPendentes").collection("items").document(farm_id).delete()
+
+        # Atualiza os botões
+        self.aprovar_button.disabled = True
+        self.aprovar_button.label = "Aprovado"
+        self.aprovar_button.emoji = "<:verifica2:1376988479891837009>"
+        self.rejeitar_button.disabled = True
+        self.rejeitar_button.emoji = "<:remove:1377347264963547157>"
+        self.rejeitar_button.style = discord.ButtonStyle.secondary
+
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send("<:verifica:1376988195832729681> Farm aprovado e registrado com sucesso!", ephemeral=True)
+
+    async def rejeitar(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("<:remove:1377347264963547157> Você não tem permissão para rejeitar.", ephemeral=True)
+            return
+
+        # Remove o farm pendente do Firebase
+        bot_id = str(interaction.client.user.id)
+        farm_id = str(interaction.message.id)
+
+        db.collection(bot_id).document("farmsPendentes").collection("items").document(farm_id).delete()
+        
+        self.aprovar_button.disabled = True
+        self.rejeitar_button.disabled = True
+        self.rejeitar_button.label = "Rejeitado"
+        self.rejeitar_button.emoji = "<:remove1:1377385311428022446>"
+        self.aprovar_button.style = discord.ButtonStyle.secondary
+        self.aprovar_button.emoji = "<:verifica:1376988195832729681>"
+
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send("<:remove:1377347264963547157> Farm rejeitado. Nenhum dado foi salvo.", ephemeral=True)
 
     
 
