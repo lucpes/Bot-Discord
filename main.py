@@ -8,6 +8,7 @@ from datetime import datetime
 import pytz
 import io                    # carregar imagem
 import uuid
+import re
 
 tz = pytz.timezone('America/Sao_Paulo')
 timestamp = datetime.now(tz)
@@ -671,7 +672,135 @@ class AprovacaoView(discord.ui.View):
                 
                 
 
-    
+# Comando para criar a lista
+@bot.tree.command(name="lista", description="Cria uma lista personalizada")
+@check_cargo_permitido("Gerente")
+@app_commands.describe(
+    nome="Nome da lista",
+    quantidade="Número de pessoas que cabem (0 = sem limite)",
+    tempo="Tempo (em minutos) que a lista ficará aberta"
+)
+async def lista(
+    interaction: discord.Interaction,
+    nome: str,
+    quantidade: int,
+    tempo: int
+):
+    await interaction.response.defer()
+
+    embed = discord.Embed(
+        title=f"📋 {nome}",
+        description="Carregando...",
+        color=discord.Color.blue()
+    )
+
+    view = ListaView(nome, quantidade, interaction.user, embed)
+    message = await interaction.followup.send(embed=embed, view=view)
+    view.message = message  # Associar a message à View
+
+    # Atualiza a embed inicial
+    embed.description = (
+        f"👥 Capacidade: {'Sem limite' if quantidade == 0 else f'{quantidade} pessoas'}\n"
+        f"🛡️ Criada por: {interaction.user.mention}\n\n**Participantes:** *(vazio)*\n\n"
+        "*Clique no botão abaixo para entrar na lista!*"
+    )
+    await message.edit(embed=embed, view=view)
+
+    # Espera o tempo para encerrar a lista
+    await asyncio.sleep(tempo * 60)
+
+    view.disable_all_items()
+    embed.title += " (Encerrada)"
+    embed.color = discord.Color.red()
+    await message.edit(embed=embed, view=view)
+    await interaction.followup.send(f"A lista **{nome}** foi encerrada ⏳", ephemeral=True)
+
+
+# View da lista com botão de entrada
+class ListaView(discord.ui.View):
+    def __init__(self, nome, quantidade, autor, embed):
+        super().__init__(timeout=None)
+        self.nome = nome
+        self.quantidade = quantidade
+        self.autor = autor
+        self.embed = embed
+        self.participantes: list[discord.User] = []
+        self.message = None  # Será atribuído depois do envio inicial
+
+    @discord.ui.button(label="Entrar na lista", style=discord.ButtonStyle.green)
+    async def entrar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+
+        if user in self.participantes:
+            await interaction.response.send_message("Você já está na lista!", ephemeral=True)
+            return
+
+        if self.quantidade != 0 and len(self.participantes) >= self.quantidade:
+            await interaction.response.send_message("A lista já está cheia!", ephemeral=True)
+            return
+
+        self.participantes.append(user)
+
+        # Atualiza o embed com os nomes dos participantes
+        lista_formatada = "\n".join(f"{i+1}. {p.mention}" for i, p in enumerate(self.participantes))
+        self.embed.description = (
+            f"👥 Capacidade: {'Sem limite' if self.quantidade == 0 else f'{self.quantidade} pessoas'}\n"
+            f"⏱️ Criada por: {self.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
+            "*Clique no botão abaixo para entrar na lista!*"
+        )
+
+        await self.message.edit(embed=self.embed, view=self)
+        await interaction.response.send_message(f"{user.mention}, você entrou na lista **{self.nome}** ✅", ephemeral=True)
+
+        # Envia mensagem no privado com botão para sair
+        try:
+            sair_view = SairDaListaView(self, user)
+            await user.send(
+                f"Olá {user.mention}, você entrou na lista **{self.nome}**.\n"
+                "Caso deseje sair, clique no botão abaixo:",
+                view=sair_view
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                f"{user.mention}, não consegui te enviar DM. Verifique suas configurações de privacidade.",
+                ephemeral=True
+            )
+
+    def disable_all_items(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# View com botão de sair da lista (enviada via DM)
+class SairDaListaView(discord.ui.View):
+    def __init__(self, lista_view: ListaView, usuario: discord.User):
+        super().__init__(timeout=None)
+        self.lista_view = lista_view
+        self.usuario = usuario
+
+    @discord.ui.button(label="Sair da lista", style=discord.ButtonStyle.red)
+    async def sair(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.usuario:
+            await interaction.response.send_message("Você não pode usar esse botão!", ephemeral=True)
+            return
+
+        if self.usuario in self.lista_view.participantes:
+            self.lista_view.participantes.remove(self.usuario)
+
+            # Atualiza embed no canal
+            lista_formatada = "\n".join(f"{i+1}. {p.mention}" for i, p in enumerate(self.lista_view.participantes)) or "*(vazio)*"
+            self.lista_view.embed.description = (
+                f"👥 Capacidade: {'Sem limite' if self.lista_view.quantidade == 0 else f'{self.lista_view.quantidade} pessoas'}\n"
+                f"⏱️ Criada por: {self.lista_view.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
+                "*Clique no botão abaixo para entrar na lista!*"
+            )
+
+            await self.lista_view.message.edit(embed=self.lista_view.embed, view=self.lista_view)
+            await interaction.response.send_message("Você saiu da lista com sucesso ✅", ephemeral=True)
+            self.stop()
+        else:
+            await interaction.response.send_message("Você já não está mais na lista.", ephemeral=True)
+            
 
 
 @bot.tree.command(name="teste", description="descrição teste")
