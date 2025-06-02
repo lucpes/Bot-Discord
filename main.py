@@ -1,5 +1,8 @@
-import discord
+import discord  #py-cord ou discord.py
 from discord import app_commands
+from discord.ui import View, Select
+from discord import Interaction, Embed, Color
+from discord import SelectOption
 from discord.ext import commands
 from dotenv import load_dotenv
 import os
@@ -9,6 +12,9 @@ import pytz
 import io                    # carregar imagem
 import uuid
 import re     # remover depois / não estou mais usando
+import gspread
+#from oauth2client.service_account import ServiceAccountCredentials    # planilha do google
+from google.oauth2.service_account import Credentials
 
 tz = pytz.timezone('America/Sao_Paulo')
 timestamp = datetime.now(tz)
@@ -86,6 +92,115 @@ def check_cargo_permitido(nome_cargo: str):
     return app_commands.check(predicate)
 
 #============================================================================================================================================#
+
+# Planilha Excel
+
+# Autenticar com Google Sheets
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_file("credenciais.json", scopes=scope)
+client = gspread.authorize(creds)
+spreadsheet = client.open("Farm Chicletões")
+sheet = spreadsheet.sheet1
+
+async def atualizar_planilha_completa(bot, guild):
+    # Autentica com gspread
+    creds = Credentials.from_service_account_file("credenciais.json", scopes=scope)
+    client = gspread.authorize(creds)
+
+    spreadsheet = client.open("Farm Chicletões")
+    sheet = spreadsheet.sheet1
+    sheet.clear()  # Limpa a planilha antes de atualizar
+
+    # Cabeçalhos
+    sheet.append_row(["Usuário", "Total Farms", "V1", "V2", "V3", "V4"])
+
+    # Firebase
+    bot_id = str(bot.user.id)
+    users_ref = db.collection(bot_id).document("farms").collection("users")
+    users = users_ref.stream()
+
+    for user_doc in users:
+        data = user_doc.to_dict()
+        user_id = data.get("user_id")
+
+        if not user_id:
+            print(f"[AVISO] Documento '{user_doc.id}' sem user_id.")
+            continue
+
+        try:
+            member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
+            nickname = member.nick if member.nick else member.name  # Usa apelido se existir, senão nome
+        except Exception as e:
+            print(f"[ERRO] Falha ao buscar membro {user_id}: {e}")
+            nickname = f"ID {user_id}"
+
+        total = sum([
+            data.get("valor1", 0),
+            data.get("valor2", 0),
+            data.get("valor3", 0),
+            data.get("valor4", 0),
+        ])
+
+        sheet.append_row([
+            nickname,
+            total,
+            data.get("valor1", 0),
+            data.get("valor2", 0),
+            data.get("valor3", 0),
+            data.get("valor4", 0)
+        ])
+
+#============================================================================================================================================#
+
+async def enviar_painel_registro(interaction: Interaction):
+    embed_register = Embed(
+        title="CENTRAL DE REGISTRO・Chicletões Norte",
+        description="Seja bem-vindo(a) à Chicletões Norte! Para ter acesso\n a todos os nossos canais, por favor, realize\n seu registro abaixo.",
+        color=Color.blurple()
+    )
+    embed_register.set_thumbnail(url=interaction.client.user.avatar.url)
+    embed_register.set_footer(
+        icon_url=interaction.client.user.avatar.url,
+        text="Todos os direitos reservados a mim mesmo"
+    )
+
+    view = RegisterButton()
+    await interaction.channel.send(embed=embed_register, view=view)
+    await interaction.response.send_message("Painel de registro enviado com sucesso!", ephemeral=True)
+
+# View do seletor de paineis
+class PaineisView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        self.select_menu = Select(
+            placeholder="Selecione um painel para enviar",
+            min_values=1,
+            max_values=1,
+            options=[
+                SelectOption(label="Painel de Registro", value="painel_registro", description="Painel fixo de registro da Chicletões Norte"),
+            ]
+        )
+        self.select_menu.callback = self.on_select
+        self.add_item(self.select_menu)
+
+    async def on_select(self, interaction: Interaction):
+        escolha = self.select_menu.values[0]
+
+        if escolha == "painel_registro":
+            await enviar_painel_registro(interaction)
+        else:
+            await interaction.response.send_message("Painel não reconhecido.", ephemeral=True)
+
+# Comando principal que chama o seletor de paineis
+@bot.tree.command(name="painel", description="Selecione e envie um painel")
+@check_cargo_permitido("Gerente")
+async def painel_selector(interaction: Interaction):
+    view = PaineisView()
+    await interaction.response.send_message("Selecione um painel para enviar:", view=view, ephemeral=True)
+
+
+
 
 
 
@@ -626,7 +741,9 @@ class AprovacaoView(discord.ui.View):
                 await interaction.followup.send("❌ Ocorreu um erro crítico ao aprovar o farm.", ephemeral=True)
             except:
                 print("Não foi possível enviar mensagem de erro")
-
+                
+        await atualizar_planilha_completa(bot, interaction.guild)
+        
     async def rejeitar(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("<:remove:1377347264963547157> Sem permissão.", ephemeral=True)
@@ -749,7 +866,7 @@ class ListaView(discord.ui.View):
         lista_formatada = "\n".join(f"{i+1}. {p.mention}" for i, p in enumerate(self.participantes))
         self.embed.description = (
             f"👥 Capacidade: {'Sem limite' if self.quantidade == 0 else f'{self.quantidade} pessoas'}\n"
-            f"⏱️ Criada por: {self.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
+            f"🛡️ Criada por: {self.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
             "*Clique no botão abaixo para entrar na lista!*"
         )
 
@@ -795,7 +912,7 @@ class SairDaListaView(discord.ui.View):
             lista_formatada = "\n".join(f"{i+1}. {p.mention}" for i, p in enumerate(self.lista_view.participantes)) or "*(vazio)*"
             self.lista_view.embed.description = (
                 f"👥 Capacidade: {'Sem limite' if self.lista_view.quantidade == 0 else f'{self.lista_view.quantidade} pessoas'}\n"
-                f"⏱️ Criada por: {self.lista_view.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
+                f"🛡️ Criada por: {self.lista_view.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
                 "*Clique no botão abaixo para entrar na lista!*"
             )
 
@@ -810,6 +927,11 @@ class SairDaListaView(discord.ui.View):
 @bot.tree.command(name="teste", description="descrição teste")
 async def teste(interaction: discord.Interaction):
     await interaction.response.send_message("Hello World")
+    
+#============================================================================================================================================#
 
+
+
+#============================================================================================================================================#
 
 bot.run(TOKEN)
