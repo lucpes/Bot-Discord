@@ -8,7 +8,7 @@ from datetime import datetime
 import pytz
 import io                    # carregar imagem
 import uuid
-import re
+import re     # remover depois / não estou mais usando
 
 tz = pytz.timezone('America/Sao_Paulo')
 timestamp = datetime.now(tz)
@@ -392,6 +392,10 @@ class FarmModal(discord.ui.Modal, title="ㅤㅤㅤ┃ Enviar Farm ┃"):
             embed_log.add_field(name="Valor 3", value=self.valor3.value)
             embed_log.add_field(name="Valor 4", value=self.valor4.value)
             embed_log.set_image(url="attachment://farm.png")
+            
+            user_id = interaction.user.id   
+            embed_log.set_footer(text=f"ID do usuário: {user_id}")
+            embed_log.timestamp = discord.utils.utcnow()
 
             # Envia para o canal de log
             log_msg = await log_channel.send(
