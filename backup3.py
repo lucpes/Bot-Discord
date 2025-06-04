@@ -1,9 +1,9 @@
-# backup 03/06
+# 04/06
 
 import discord  #py-cord ou discord.py
 from discord import app_commands
 from discord.ui import View, Select, button, Modal, TextInput
-from discord import Interaction, Embed, Color, ButtonStyle, SelectOption
+from discord import Interaction, Embed, Color, ButtonStyle, SelectOption, TextStyle
 from discord.ext import commands
 from dotenv import load_dotenv
 import os
@@ -40,7 +40,6 @@ if not firebase_admin._apps:
     cred = credentials.Certificate(os.getenv("FIREBASE_KEY_PATH"))
     firebase_admin.initialize_app(cred)
 db = firestore.client()
-
 #============================================================================================================================================#
 
 # Ligar o Bot
@@ -77,7 +76,7 @@ async def on_ready():
     bot.add_view(RegisterButton())
     bot.add_view(ApproveButton())
     bot.add_view(FarmView())
-    
+    bot.add_view(RemoverFarmView(db))
     # Executa a restauração em segundo plano
     bot.loop.create_task(restaurar_farms_pendentes(bot))
     
@@ -262,6 +261,19 @@ class ApproveButton(discord.ui.View):                             # Classe do Bo
         try:
             await member.add_roles(cargo_aprovado, reason="Registro aprovado")
             await member.edit(nick=novo_apelido, reason="Apelido ajustado após aprovação")
+            
+            user_ref = db.collection(str(interaction.client.user.id)).document("farms").collection("users").document(str(member.id))
+
+            user_ref.set({
+                "user_id": str(member.id),
+                "id_game": id_game,
+                "valor1": 0,
+                "valor2": 0,
+                "valor3": 0,
+                "valor4": 0,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+            
         except discord.Forbidden:
             await interaction.response.send_message("<:remove:1377347264963547157> Permissões insuficientes para modificar o usuário.", ephemeral=True)
             return
@@ -518,7 +530,7 @@ class FarmModal(discord.ui.Modal, title="ㅤㅤㅤ┃ Enviar Farm ┃"):
                 embed=embed_log,
                 file=discord.File(io.BytesIO(image_bytes), filename="farm.png"),
                 view=AprovacaoView(
-                    user_id=interaction.user.id,
+                    user_id=str(interaction.user.id),    # trocar para string
                     v1=int(self.valor1.value),
                     v2=int(self.valor2.value),
                     v3=int(self.valor3.value),
@@ -795,24 +807,28 @@ class AprovacaoView(discord.ui.View):
 PLANILHA_URL = "https://docs.google.com/spreadsheets/d/1aVt3mNI5f9NbAuhAPQPGFx0-iR3W8awMoIr1Sgp-EuQ/edit?usp=sharing"
 
 class RemoverFarmSelect(Select):
-    def __init__(self):
+    def __init__(self, db=None):
+        self.db = db
         options = [
             SelectOption(label="Remover todos os farms", value="remover_todos", description="Remove todos os farms de todos os membros"),
             SelectOption(label="Remover quantidade específica", value="remover_quantidade", description="Remove uma certa quantidade de todos os membros"),
             SelectOption(label="Remover farm de um membro", value="remover_membro", description="Remove o farm de um membro específico")
         ]
-        super().__init__(placeholder="Escolha uma ação de remoção", options=options, min_values=1, max_values=1)
+        super().__init__(placeholder="Escolha uma ação de remoção", options=options, min_values=1, max_values=1, custom_id="remover_farm_select")
 
     async def callback(self, interaction: Interaction):
         escolha = self.values[0]
 
         if escolha == "remover_todos":
             try:
-                from firebase_admin import firestore
-                db = firestore.client()
+                if self.db is None:
+                    from firebase_admin import firestore
+                    self.db = firestore.client()
 
                 bot_id = str(interaction.client.user.id)
-                users_ref = db.collection(bot_id).document("farms").collection("users")
+                users_ref = self.db.collection(bot_id).document("farms").collection("users")
+
+                # Agora garantimos que 'docs' só é chamado após a referência
                 docs = users_ref.stream()
 
                 count = 0
@@ -827,24 +843,31 @@ class RemoverFarmSelect(Select):
                     count += 1
 
                 await interaction.response.send_message(
-                    f"Todos os farms foram zerados com sucesso para {count} membros.", ephemeral=True
+                    f"✅ Todos os farms foram zerados com sucesso para **{count}** membros.",
+                    ephemeral=True
                 )
+
+                # Atualiza planilha apenas se tudo acima funcionar
+                await atualizar_planilha_completa(interaction.client, interaction.guild)
 
             except Exception as e:
                 await interaction.response.send_message(
-                    f"Ocorreu um erro ao tentar zerar os farms: {e}", ephemeral=True
+                    f"❌ Ocorreu um erro ao tentar zerar os farms: `{e}`",
+                    ephemeral=True
                 )
-                
-            await atualizar_planilha_completa(bot, interaction.guild)
-                
+            
         elif escolha == "remover_quantidade":
-            await interaction.response.send_modal(RemoverQuantidadeModal(interaction))
-            
+            await interaction.response.send_modal(RemoverQuantidadeModal())
+                
         elif escolha == "remover_membro":
-            await interaction.response.send_message("Por favor, envie o nome do membro cujo farm será removido.", ephemeral=True)
-            
-        else:
-            await interaction.response.send_message("Ação inválida.", ephemeral=True)
+            await interaction.response.send_modal(RemoverQuantidadeMembroModal(self.db))
+
+
+class RemoverFarmView(View):
+    def __init__(self, db):
+        super().__init__(timeout=None)
+        self.add_item(RemoverFarmSelect(db))
+
 
 
 class PainelGerenciaView(View):
@@ -886,9 +909,8 @@ class RemoverQuantidadeModal(Modal, title="Remover Quantidade dos Farms"):
     valor3 = TextInput(label="Valor 3", placeholder="Digite um número", required=True)
     valor4 = TextInput(label="Valor 4", placeholder="Digite um número", required=True)
 
-    def __init__(self, interaction: Interaction):
+    def __init__(self):
         super().__init__()
-        self.interaction = interaction
 
     async def on_submit(self, interaction: Interaction):
         try:
@@ -926,6 +948,57 @@ class RemoverQuantidadeModal(Modal, title="Remover Quantidade dos Farms"):
             await interaction.response.send_message("Todos os valores devem ser números inteiros.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"Erro ao atualizar farms: {e}", ephemeral=True)
+            
+
+class RemoverQuantidadeMembroModal(Modal, title="Remover Farms de um Membro"):
+    id_game = TextInput(label="ID in game", placeholder="Digite o ID in game", required=True)
+    valor1 = TextInput(label="Valor 1", placeholder="Digite um número", required=True)
+    valor2 = TextInput(label="Valor 2", placeholder="Digite um número", required=True)
+    valor3 = TextInput(label="Valor 3", placeholder="Digite um número", required=True)
+    valor4 = TextInput(label="Valor 4", placeholder="Digite um número", required=True)
+
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+
+    async def on_submit(self, interaction: Interaction):
+        try:
+            id_game = self.id_game.value.strip()
+            v1 = int(self.valor1.value)
+            v2 = int(self.valor2.value)
+            v3 = int(self.valor3.value)
+            v4 = int(self.valor4.value)
+
+            print("DB está:", self.db)
+            users_ref = self.db.collection(str(interaction.client.user.id)).document("farms").collection("users")
+            docs = users_ref.stream()
+
+            target_doc = None
+            for doc in docs:
+                data = doc.to_dict()
+                if data.get("id_game") == id_game:
+                    target_doc = doc
+                    break
+
+            if not target_doc:
+                await interaction.response.send_message("❌ ID in game não encontrado.", ephemeral=True)
+                return
+
+            data = target_doc.to_dict()
+            target_doc.reference.update({
+                "valor1": max(0, data.get("valor1", 0) - v1),
+                "valor2": max(0, data.get("valor2", 0) - v2),
+                "valor3": max(0, data.get("valor3", 0) - v3),
+                "valor4": max(0, data.get("valor4", 0) - v4),
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+
+            await interaction.response.send_message(f"✅ Valores removidos com sucesso de `{id_game}`.", ephemeral=True)
+
+        except ValueError:
+            await interaction.response.send_message("❌ Todos os valores devem ser números inteiros.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Erro: {e}", ephemeral=True)
         
                 
 #=========================================================================================================================================#
