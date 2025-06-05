@@ -39,6 +39,7 @@ if not firebase_admin._apps:
     cred = credentials.Certificate(os.getenv("FIREBASE_KEY_PATH"))
     firebase_admin.initialize_app(cred)
 db = firestore.client()
+
 #============================================================================================================================================#
 
 # Ligar o Bot
@@ -77,6 +78,7 @@ async def on_ready():
     bot.add_view(FarmView())
     bot.add_view(RemoverFarmView(db))
     bot.add_view(PainelGerenciaView()) 
+    bot.add_view(PainelVendasView())
     # Executa a restauração em segundo plano
     bot.loop.create_task(restaurar_farms_pendentes(bot))
     
@@ -180,6 +182,7 @@ class PaineisView(View):
             options=[
                 SelectOption(label="Painel de Registro", value="painel_registro", description="Painel fixo de registro da Chicletões Norte"),
                 SelectOption(label="Painel de Gerência", value="painel_gerencia", description="Painel para gerenciar farms"),
+                SelectOption(label="Painel de Vendas", value="painel_vendas", description="Painel para registrar as vendas"),
             ]
         )
         self.select_menu.callback = self.on_select
@@ -192,7 +195,9 @@ class PaineisView(View):
             await enviar_painel_registro(interaction)
         elif escolha == "painel_gerencia":
             await enviar_painel_gerencia(interaction)
-        
+        elif escolha == "painel_vendas":
+            await abrir_painel_vendas(interaction)
+            
         else:
             await interaction.response.send_message("Painel não reconhecido.", ephemeral=True)
 
@@ -1250,6 +1255,61 @@ async def sorteio(interaction: discord.Interaction, premio: str, minutos: int, g
     await view.iniciar_sorteio()
 
 #=========================================================================================================================================#
+
+class RegistrarVendaModal(discord.ui.Modal, title="Registrar Venda"):
+
+    item = discord.ui.TextInput(label="Qual item foi vendido?", placeholder="Ex: Espada mágica", required=True)
+    quantidade = discord.ui.TextInput(label="Qual a quantidade?", placeholder="Ex: 3", required=True)
+    valor = discord.ui.TextInput(label="Qual é o valor da venda?", placeholder="Ex: 1500", required=True)
+    parceria = discord.ui.TextInput(label="Com ou sem parceria?", placeholder="Ex: Com parceria / Sem parceria", required=True)
+
+    def __init__(self, autor: discord.User):
+        super().__init__()
+        self.autor = autor
+
+    async def on_submit(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="💰 Venda Registrada",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="📦 Item", value=self.item.value, inline=True)
+        embed.add_field(name="▫️ Quantidade", value=self.quantidade.value, inline=True)
+        embed.add_field(name="💸 Valor", value=f"R$ {self.valor.value}", inline=True)
+        embed.add_field(name="🤝 Parceria", value=self.parceria.value, inline=False)
+        embed.add_field(name="👤 Vendido por", value=self.autor.mention, inline=False)
+
+        await interaction.response.send_message("✅ Venda registrada com sucesso!", ephemeral=True)
+
+        # 🔁 ENVIA O EMBED PARA O CANAL DE REGISTRO
+        canal_registro = interaction.client.get_channel(1376572240359063695)  # Substitua pelo ID real
+        if canal_registro:
+            await canal_registro.send(embed=embed)
+        else:
+            print("Canal de registro não encontrado.")
+
+
+class PainelVendasView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Registrar", style=discord.ButtonStyle.secondary,emoji="🪙", custom_id="painel_vendas")
+    async def registrar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RegistrarVendaModal(interaction.user))
+        
+async def abrir_painel_vendas(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="💰 Painel de Vendas",
+        description="Clique no botão abaixo para registrar uma venda.",
+        color=discord.Color.blurple()
+    )
+    avatar = interaction.client.user.avatar
+    if avatar:
+        embed.set_thumbnail(url=avatar.url)
+    
+    await interaction.response.send_message(embed=embed, view=PainelVendasView())
+
+
+#============================================================================================================================================#
 
 @bot.tree.command(name="teste", description="descrição teste")
 async def teste(interaction: discord.Interaction):
