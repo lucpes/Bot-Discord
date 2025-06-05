@@ -1090,11 +1090,21 @@ class ListaView(discord.ui.View):
         # Envia mensagem no privado com botão para sair
         try:
             sair_view = SairDaListaView(self, user)
-            await user.send(
+            msg = await user.send(
                 f"Olá {user.mention}, você entrou na lista **{self.nome}**.\n"
                 "Caso deseje sair, clique no botão abaixo:",
                 view=sair_view
             )
+            
+            async def apagar_dm_depois():
+                await asyncio.sleep(86400)  # 1 dia  86400
+                try:
+                    await msg.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass  # Mensagem já foi apagada ou permissão negada
+
+            asyncio.create_task(apagar_dm_depois())
+            
         except discord.Forbidden:
             await interaction.followup.send(
                 f"{user.mention}, não consegui te enviar DM. Verifique suas configurações de privacidade.",
