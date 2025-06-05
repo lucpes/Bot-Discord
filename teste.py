@@ -1,14 +1,20 @@
-import discord
+import discord  #py-cord ou discord.py
 from discord import app_commands
-from discord.ext import commands
+from discord.ui import View, Select, button, Modal, TextInput
+from discord import Interaction, Embed, Color, ButtonStyle, SelectOption, TextStyle
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import os
 import asyncio               # contador de tempo
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pytz
 import io                    # carregar imagem
 import uuid
 import re     # remover depois / não estou mais usando
+import gspread
+#from oauth2client.service_account import ServiceAccountCredentials    # planilha do google
+from google.oauth2.service_account import Credentials
+import random
 
 tz = pytz.timezone('America/Sao_Paulo')
 timestamp = datetime.now(tz)
@@ -33,7 +39,6 @@ if not firebase_admin._apps:
     cred = credentials.Certificate(os.getenv("FIREBASE_KEY_PATH"))
     firebase_admin.initialize_app(cred)
 db = firestore.client()
-
 #============================================================================================================================================#
 
 # Ligar o Bot
@@ -70,7 +75,8 @@ async def on_ready():
     bot.add_view(RegisterButton())
     bot.add_view(ApproveButton())
     bot.add_view(FarmView())
-    
+    bot.add_view(RemoverFarmView(db))
+    bot.add_view(PainelGerenciaView()) 
     # Executa a restauração em segundo plano
     bot.loop.create_task(restaurar_farms_pendentes(bot))
     
@@ -86,6 +92,119 @@ def check_cargo_permitido(nome_cargo: str):
     return app_commands.check(predicate)
 
 #============================================================================================================================================#
+
+# Planilha Excel
+
+# Autenticar com Google Sheets
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_file("credenciais.json", scopes=scope)
+client = gspread.authorize(creds)
+spreadsheet = client.open("Farm Chicletões")
+sheet = spreadsheet.sheet1
+
+async def atualizar_planilha_completa(bot, guild):
+    # Autentica com gspread
+    creds = Credentials.from_service_account_file("credenciais.json", scopes=scope)
+    client = gspread.authorize(creds)
+
+    spreadsheet = client.open("Farm Chicletões")
+    sheet = spreadsheet.sheet1
+    sheet.clear()  # Limpa a planilha antes de atualizar
+
+    # Cabeçalhos
+    sheet.append_row(["Usuário", "Total Farms", "V1", "V2", "V3", "V4"])
+
+    # Firebase
+    bot_id = str(bot.user.id)
+    users_ref = db.collection(bot_id).document("farms").collection("users")
+    users = users_ref.stream()
+
+    for user_doc in users:
+        data = user_doc.to_dict()
+        user_id = data.get("user_id")
+
+        if not user_id:
+            print(f"[AVISO] Documento '{user_doc.id}' sem user_id.")
+            continue
+
+        try:
+            member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
+            nickname = member.nick if member.nick else member.name  # Usa apelido se existir, senão nome
+        except Exception as e:
+            print(f"[ERRO] Falha ao buscar membro {user_id}: {e}")
+            nickname = f"ID {user_id}"
+
+        total = sum([
+            data.get("valor1", 0),
+            data.get("valor2", 0),
+            data.get("valor3", 0),
+            data.get("valor4", 0),
+        ])
+
+        sheet.append_row([
+            nickname,
+            total,
+            data.get("valor1", 0),
+            data.get("valor2", 0),
+            data.get("valor3", 0),
+            data.get("valor4", 0)
+        ])
+
+#============================================================================================================================================#
+
+async def enviar_painel_registro(interaction: Interaction):
+    embed_register = Embed(
+        title="CENTRAL DE REGISTRO・Chicletões Norte",
+        description="Seja bem-vindo(a) à Chicletões Norte! Para ter acesso\n a todos os nossos canais, por favor, realize\n seu registro abaixo.",
+        color=Color.blurple()
+    )
+    embed_register.set_thumbnail(url=interaction.client.user.avatar.url)
+    embed_register.set_footer(
+        icon_url=interaction.client.user.avatar.url,
+        text="Todos os direitos reservados a mim mesmo"
+    )
+
+    view = RegisterButton()
+    await interaction.channel.send(embed=embed_register, view=view)
+    await interaction.response.send_message("Painel de registro enviado com sucesso!", ephemeral=True)
+
+# View do seletor de paineis
+class PaineisView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        self.select_menu = Select(
+            placeholder="Selecione um painel para enviar",
+            min_values=1,
+            max_values=1,
+            options=[
+                SelectOption(label="Painel de Registro", value="painel_registro", description="Painel fixo de registro da Chicletões Norte"),
+                SelectOption(label="Painel de Gerência", value="painel_gerencia", description="Painel para gerenciar farms"),
+            ]
+        )
+        self.select_menu.callback = self.on_select
+        self.add_item(self.select_menu)
+
+    async def on_select(self, interaction: Interaction):
+        escolha = self.select_menu.values[0]
+
+        if escolha == "painel_registro":
+            await enviar_painel_registro(interaction)
+        elif escolha == "painel_gerencia":
+            await enviar_painel_gerencia(interaction)
+        
+        else:
+            await interaction.response.send_message("Painel não reconhecido.", ephemeral=True)
+
+# Comando principal que chama o seletor de paineis
+@bot.tree.command(name="painel", description="Selecione e envie um painel")
+@check_cargo_permitido("Gerente")
+async def painel_selector(interaction: Interaction):
+    view = PaineisView()
+    await interaction.response.send_message("Selecione um painel para enviar:", view=view, ephemeral=True)
+
+
+
 
 
 
@@ -146,6 +265,19 @@ class ApproveButton(discord.ui.View):                             # Classe do Bo
         try:
             await member.add_roles(cargo_aprovado, reason="Registro aprovado")
             await member.edit(nick=novo_apelido, reason="Apelido ajustado após aprovação")
+            
+            user_ref = db.collection(str(interaction.client.user.id)).document("farms").collection("users").document(str(member.id))
+
+            user_ref.set({
+                "user_id": str(member.id),
+                "id_game": id_game,
+                "valor1": 0,
+                "valor2": 0,
+                "valor3": 0,
+                "valor4": 0,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+            
         except discord.Forbidden:
             await interaction.response.send_message("<:remove:1377347264963547157> Permissões insuficientes para modificar o usuário.", ephemeral=True)
             return
@@ -264,10 +396,6 @@ class RegisterModal(discord.ui.Modal, title="­­  ­­­­­┃𝐅𝐨𝐫𝐦
             print(f"Canal com ID {canal_log_register} não encontrado.")
             
             
-        
-                   
-@bot.tree.command(name="painel_registro", description="Envia o painel fixo de registro")    # Criar o painel de registro // Depois precisa criar uma função com todos os paineis
-@check_cargo_permitido("Gerente")                                       # Substitua pelo nome exato do cargo
 async def send_embed(interaction: discord.Interaction):
     embed_register = discord.Embed(
         title="CENTRAL DE REGISTRO・Chicletões Norte",
@@ -402,7 +530,7 @@ class FarmModal(discord.ui.Modal, title="ㅤㅤㅤ┃ Enviar Farm ┃"):
                 embed=embed_log,
                 file=discord.File(io.BytesIO(image_bytes), filename="farm.png"),
                 view=AprovacaoView(
-                    user_id=interaction.user.id,
+                    user_id=str(interaction.user.id),    # trocar para string
                     v1=int(self.valor1.value),
                     v2=int(self.valor2.value),
                     v3=int(self.valor3.value),
@@ -626,7 +754,9 @@ class AprovacaoView(discord.ui.View):
                 await interaction.followup.send("❌ Ocorreu um erro crítico ao aprovar o farm.", ephemeral=True)
             except:
                 print("Não foi possível enviar mensagem de erro")
-
+                
+        await atualizar_planilha_completa(bot, interaction.guild)
+        
     async def rejeitar(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("<:remove:1377347264963547157> Sem permissão.", ephemeral=True)
@@ -674,7 +804,208 @@ class AprovacaoView(discord.ui.View):
             except:
                 print("Não foi possível enviar mensagem de erro")
                 
+PLANILHA_URL = "https://docs.google.com/spreadsheets/d/1aVt3mNI5f9NbAuhAPQPGFx0-iR3W8awMoIr1Sgp-EuQ/edit?usp=sharing"
+
+class RemoverFarmSelect(Select):
+    def __init__(self, db=None):
+        self.db = db
+        options = [
+            SelectOption(label="Remover todos os farms", value="remover_todos", description="Remove todos os farms de todos os membros"),
+            SelectOption(label="Remover quantidade específica", value="remover_quantidade", description="Remove uma certa quantidade de todos os membros"),
+            SelectOption(label="Remover farm de um membro", value="remover_membro", description="Remove o farm de um membro específico")
+        ]
+        super().__init__(placeholder="Escolha uma ação de remoção", options=options, min_values=1, max_values=1, custom_id="remover_farm_select")
+
+    async def callback(self, interaction: Interaction):
+        escolha = self.values[0]
+
+        if escolha == "remover_todos":
+            try:
+                if self.db is None:
+                    from firebase_admin import firestore
+                    self.db = firestore.client()
+
+                bot_id = str(interaction.client.user.id)
+                users_ref = self.db.collection(bot_id).document("farms").collection("users")
+
+                # Agora garantimos que 'docs' só é chamado após a referência
+                docs = users_ref.stream()
+
+                count = 0
+                for doc in docs:
+                    doc.reference.update({
+                        "valor1": 0,
+                        "valor2": 0,
+                        "valor3": 0,
+                        "valor4": 0,
+                        "timestamp": firestore.SERVER_TIMESTAMP
+                    })
+                    count += 1
+
+                await interaction.response.send_message(
+                    f"✅ Todos os farms foram zerados com sucesso para **{count}** membros.",
+                    ephemeral=True
+                )
+
+                # Atualiza planilha apenas se tudo acima funcionar
+                await atualizar_planilha_completa(interaction.client, interaction.guild)
+
+            except Exception as e:
+                await interaction.response.send_message(
+                    f"❌ Ocorreu um erro ao tentar zerar os farms: `{e}`",
+                    ephemeral=True
+                )
+            
+        elif escolha == "remover_quantidade":
+            await interaction.response.send_modal(RemoverQuantidadeModal())
                 
+        elif escolha == "remover_membro":
+            if self.db is None:
+                from firebase_admin import firestore
+                self.db = firestore.client()
+
+            # NENHUMA MENSAGEM antes do modal!
+            await interaction.response.send_modal(RemoverQuantidadeMembroModal(self.db))
+
+
+class RemoverFarmView(View):
+    def __init__(self, db):
+        super().__init__(timeout=None)
+        self.add_item(RemoverFarmSelect(db))
+
+
+
+class PainelGerenciaView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @button(label="Ver Farm", style=ButtonStyle.success, custom_id="ver_farm")
+    async def ver_farm(self, interaction: Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(f"Aqui está o link da planilha: {PLANILHA_URL}", ephemeral=True)
+
+    @button(label="Remover Farm", style=ButtonStyle.danger, custom_id="remover_farm")
+    async def remover_farm(self, interaction: Interaction, button: discord.ui.Button):
+        # Abre seletor com as opções de remoção
+        view = View()
+        view.add_item(RemoverFarmSelect())
+        await interaction.response.send_message("Escolha uma das opções abaixo:", view=view, ephemeral=True)
+
+async def enviar_painel_gerencia(interaction: Interaction):
+    embed = Embed(
+        title="Painel de Gerência",
+        description="Utilize os botões abaixo para visualizar ou remover farms.",
+        color=Color.gold()
+    )
+    embed.set_thumbnail(url=interaction.client.user.avatar.url)
+
+    view = PainelGerenciaView()
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("Painel de gerência enviado com sucesso!", ephemeral=True)
+
+    
+class RemoverQuantidadeModal(Modal, title="Remover Quantidade dos Farms"):
+    valor1 = TextInput(label="Valor 1", placeholder="Digite um número", required=True)
+    valor2 = TextInput(label="Valor 2", placeholder="Digite um número", required=True)
+    valor3 = TextInput(label="Valor 3", placeholder="Digite um número", required=True)
+    valor4 = TextInput(label="Valor 4", placeholder="Digite um número", required=True)
+
+    def __init__(self):
+        super().__init__()
+
+    async def on_submit(self, interaction: Interaction):
+        try:
+            v1 = int(self.valor1.value)
+            v2 = int(self.valor2.value)
+            v3 = int(self.valor3.value)
+            v4 = int(self.valor4.value)
+
+            from firebase_admin import firestore
+            db = firestore.client()
+
+            bot_id = str(interaction.client.user.id)
+            users_ref = db.collection(bot_id).document("farms").collection("users")
+            docs = users_ref.stream()
+
+            count = 0
+            for doc in docs:
+                data = doc.to_dict()
+                doc.reference.update({
+                    "valor1": max(0, data.get("valor1", 0) - v1),
+                    "valor2": max(0, data.get("valor2", 0) - v2),
+                    "valor3": max(0, data.get("valor3", 0) - v3),
+                    "valor4": max(0, data.get("valor4", 0) - v4),
+                    "timestamp": firestore.SERVER_TIMESTAMP
+                })
+                count += 1
+
+            await interaction.response.send_message(
+                f"Valores removidos com sucesso de {count} membros.", ephemeral=True
+            )
+            
+            await atualizar_planilha_completa(bot, interaction.guild)
+
+        except ValueError:
+            await interaction.response.send_message("Todos os valores devem ser números inteiros.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Erro ao atualizar farms: {e}", ephemeral=True)
+            
+
+class RemoverQuantidadeMembroModal(Modal, title="Remover Farms de um Membro"):
+    id_game = TextInput(label="ID in game", placeholder="Digite o ID in game", required=True)
+    valor1 = TextInput(label="Valor 1", placeholder="Digite um número", required=True)
+    valor2 = TextInput(label="Valor 2", placeholder="Digite um número", required=True)
+    valor3 = TextInput(label="Valor 3", placeholder="Digite um número", required=True)
+    valor4 = TextInput(label="Valor 4", placeholder="Digite um número", required=True)
+
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+
+    async def on_submit(self, interaction):
+        try:
+            id_game = self.id_game.value.strip()
+            v1 = int(self.valor1.value)
+            v2 = int(self.valor2.value)
+            v3 = int(self.valor3.value)
+            v4 = int(self.valor4.value)
+
+            if self.db is None:
+                self.db = firestore.client()
+
+            users_ref = self.db.collection(str(interaction.client.user.id)).document("farms").collection("users")
+            docs = users_ref.stream()
+
+            target_doc = None
+            for doc in docs:
+                data = doc.to_dict()
+                if data.get("id_game") == id_game:
+                    target_doc = doc
+                    break
+
+            if not target_doc:
+                await interaction.response.send_message("❌ ID in game não encontrado.", ephemeral=True)
+                return
+
+            data = target_doc.to_dict()
+            target_doc.reference.update({
+                "valor1": max(0, data.get("valor1", 0) - v1),
+                "valor2": max(0, data.get("valor2", 0) - v2),
+                "valor3": max(0, data.get("valor3", 0) - v3),
+                "valor4": max(0, data.get("valor4", 0) - v4),
+                "timestamp": firestore.SERVER_TIMESTAMP  # ← Agora firestore foi importado corretamente
+            })
+
+            await interaction.response.send_message(f"✅ Valores removidos com sucesso de `{id_game}`.", ephemeral=True)
+
+            await atualizar_planilha_completa(bot, interaction.guild)
+            
+        except ValueError:
+            await interaction.response.send_message("❌ Todos os valores devem ser números inteiros.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Erro: {e}", ephemeral=True)
+        
+                
+#=========================================================================================================================================#
 
 # Comando para criar a lista
 @bot.tree.command(name="lista", description="Cria uma lista personalizada")
@@ -749,7 +1080,7 @@ class ListaView(discord.ui.View):
         lista_formatada = "\n".join(f"{i+1}. {p.mention}" for i, p in enumerate(self.participantes))
         self.embed.description = (
             f"👥 Capacidade: {'Sem limite' if self.quantidade == 0 else f'{self.quantidade} pessoas'}\n"
-            f"⏱️ Criada por: {self.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
+            f"🛡️ Criada por: {self.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
             "*Clique no botão abaixo para entrar na lista!*"
         )
 
@@ -795,7 +1126,7 @@ class SairDaListaView(discord.ui.View):
             lista_formatada = "\n".join(f"{i+1}. {p.mention}" for i, p in enumerate(self.lista_view.participantes)) or "*(vazio)*"
             self.lista_view.embed.description = (
                 f"👥 Capacidade: {'Sem limite' if self.lista_view.quantidade == 0 else f'{self.lista_view.quantidade} pessoas'}\n"
-                f"⏱️ Criada por: {self.lista_view.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
+                f"🛡️ Criada por: {self.lista_view.autor.mention}\n\n**Participantes:**\n{lista_formatada}\n\n"
                 "*Clique no botão abaixo para entrar na lista!*"
             )
 
@@ -805,11 +1136,103 @@ class SairDaListaView(discord.ui.View):
         else:
             await interaction.response.send_message("Você já não está mais na lista.", ephemeral=True)
             
+#=========================================================================================================================================#
 
+# Sistema de sorteio
+
+class SorteioView(discord.ui.View):
+    def __init__(self, premio, duracao_min, ganhadores, autor, message=None):
+        super().__init__(timeout=None)
+        self.premio = premio
+        self.duracao_min = duracao_min
+        self.ganhadores = ganhadores
+        self.autor = autor
+        self.participantes: list[discord.User] = []
+        self.message = message
+        self.tempo_restante = duracao_min
+
+    @discord.ui.button(label="🎟️ Participar", style=discord.ButtonStyle.green, custom_id="participar_sorteio")
+    async def participar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+
+        if user in self.participantes:
+            await interaction.response.send_message("Você já está participando do sorteio!", ephemeral=True)
+        else:
+            self.participantes.append(user)
+            await interaction.response.send_message("Você entrou no sorteio com sucesso! 🎉", ephemeral=True)
+
+    def gerar_embed(self):
+        embed = discord.Embed(
+            title="🎉 Sorteio em andamento!",
+            description=f"**🎁 Prêmio:** {self.premio}\n"
+                        f"**⏰ Tempo restante:** {self.tempo_restante} minuto(s)\n"
+                        f"**👤 Criado por:** {self.autor.mention}\n\n"
+                        f"**🏆 Ganhadores:** {self.ganhadores}\n"
+                        f"**🎟️ Participantes:** {len(self.participantes)}",
+            color=discord.Color.purple()
+        )
+        embed.set_footer(text=f"Iniciado por {self.autor}")
+        return embed
+
+    async def iniciar_sorteio(self):
+        while self.tempo_restante > 0:
+            await asyncio.sleep(60)
+            self.tempo_restante -= 1
+            if self.message:
+                await self.message.edit(embed=self.gerar_embed(), view=self)
+
+        # Encerrar sorteio
+        self.disable_all_items()
+        if self.message:
+            await self.message.edit(view=self)
+
+        if len(self.participantes) == 0:
+            resultado = "❌ Ninguém participou do sorteio."
+        else:
+            ganhadores = random.sample(
+                self.participantes,
+                k=min(self.ganhadores, len(self.participantes))
+            )
+            mencoes = "\n".join(f"🎉 {g.mention}" for g in ganhadores)
+            resultado = f"🏆 Sorteio finalizado! 🏆\n\n**Prêmio:** {self.premio}\n\n**Ganhadores:**\n{mencoes}"
+
+        await self.message.channel.send(resultado)
+
+    def disable_all_items(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# Comando slash para iniciar sorteio
+@bot.tree.command(name="sorteio", description="Cria um sorteio com prêmio e duração")
+@check_cargo_permitido("Gerente")  # Seu verificador de permissão, se tiver
+@app_commands.describe(
+    premio="Prêmio do sorteio",
+    minutos="Duração em minutos",
+    ganhadores="Número de vencedores"
+)
+async def sorteio(interaction: discord.Interaction, premio: str, minutos: int, ganhadores: int):
+    await interaction.response.defer()
+
+    autor = interaction.user.mention
+    view = SorteioView(premio, minutos, ganhadores, autor)
+
+    embed = view.gerar_embed()
+    message = await interaction.followup.send(embed=embed, view=view)
+    view.message = message
+
+    await view.iniciar_sorteio()
+
+#=========================================================================================================================================#
 
 @bot.tree.command(name="teste", description="descrição teste")
 async def teste(interaction: discord.Interaction):
     await interaction.response.send_message("Hello World")
+    
+#============================================================================================================================================#
 
+
+
+#============================================================================================================================================#
 
 bot.run(TOKEN)

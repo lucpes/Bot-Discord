@@ -2,11 +2,11 @@ import discord  #py-cord ou discord.py
 from discord import app_commands
 from discord.ui import View, Select, button, Modal, TextInput
 from discord import Interaction, Embed, Color, ButtonStyle, SelectOption, TextStyle
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import os
 import asyncio               # contador de tempo
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pytz
 import io                    # carregar imagem
 import uuid
@@ -14,6 +14,7 @@ import re     # remover depois / não estou mais usando
 import gspread
 #from oauth2client.service_account import ServiceAccountCredentials    # planilha do google
 from google.oauth2.service_account import Credentials
+import random
 
 tz = pytz.timezone('America/Sao_Paulo')
 timestamp = datetime.now(tz)
@@ -1137,6 +1138,108 @@ class SairDaListaView(discord.ui.View):
             
 #=========================================================================================================================================#
 
+# Sistema de sorteio
+
+class SorteioView(discord.ui.View):
+    def __init__(self, premio, duracao_min, ganhadores, autor, message=None):
+        super().__init__(timeout=None)
+        self.premio = premio
+        self.duracao_min = duracao_min
+        self.ganhadores = ganhadores
+        self.autor = autor
+        self.participantes: list[discord.User] = []
+        self.message = message
+        self.tempo_restante = duracao_min
+
+    @discord.ui.button(label="🎉 Participar", style=discord.ButtonStyle.primary, custom_id="participar_sorteio")
+    async def participar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+
+        if user in self.participantes:
+            await interaction.response.send_message("Você já está participando do sorteio!", ephemeral=True)
+        else:
+            self.participantes.append(user)
+            await interaction.response.send_message("Você entrou no sorteio com sucesso! 🎉", ephemeral=True)
+            
+            if self.message:
+                await self.message.edit(embed=self.gerar_embed(), view=self)
+
+    def gerar_embed(self):
+        embed = discord.Embed(
+            title="<a:Confete:1379906033513926820> Sorteio em andamento!",
+            description=f"**🎁 Prêmio:** {self.premio}\n"
+                        f"**⏰ Tempo restante:** {self.tempo_restante} minuto(s)\n"
+                        f"**👤 Criado por:** {self.autor.mention}\n"
+                        f"**🏆 Ganhadores:** {self.ganhadores}\n"
+                        f"**🎟️ Participantes:** {len(self.participantes)}",
+            color=discord.Color.purple() 
+        )
+        '''embed.set_footer(text=f"**⏰ Tempo restante:** {self.tempo_restante} minuto(s)")'''
+        return embed
+
+    async def iniciar_sorteio(self):
+        while self.tempo_restante > 0:
+            await asyncio.sleep(60)
+            self.tempo_restante -= 1
+            if self.message:
+                await self.message.edit(embed=self.gerar_embed(), view=self)
+
+        # Encerrar sorteio
+        self.disable_all_items()
+        if self.message:
+            await self.message.edit(view=self)
+
+        if len(self.participantes) == 0:
+            resultado = "❌ Ninguém participou do sorteio."
+        else:
+            ganhadores = random.sample(
+                self.participantes,
+                k=min(self.ganhadores, len(self.participantes))
+            )
+            mencoes = "\n".join(f"🎉 {g.mention}" for g in ganhadores)
+            await self.message.pin()
+            resultado = f"🏆 Sorteio finalizado! 🏆\n\n**Prêmio:** {self.premio}\n\n**Ganhadores:**\n{mencoes}"
+
+        await self.message.channel.send(content=resultado, reference=self.message)
+        
+        
+        if len(self.participantes) > 0:
+            for g in ganhadores:
+                try:
+                    await g.send(
+                        f"🎉 Parabéns! Você foi um dos ganhadores do sorteio **{self.premio}**!\n"
+                        f"Confira o sorteio no canal {self.message.channel.mention}!"
+)
+                except discord.Forbidden:
+                    # O usuário pode ter o bloqueio de DMs ativado
+                    print(f"Não foi possível enviar DM para {g.name}")
+
+    def disable_all_items(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# Comando slash para iniciar sorteio
+@bot.tree.command(name="sorteio", description="Cria um sorteio com prêmio e duração")
+@check_cargo_permitido("Gerente")  # Seu verificador de permissão, se tiver
+@app_commands.describe(
+    premio="Prêmio do sorteio",
+    minutos="Duração em minutos",
+    ganhadores="Número de vencedores"
+)
+async def sorteio(interaction: discord.Interaction, premio: str, minutos: int, ganhadores: int):
+    await interaction.response.defer()
+
+    autor = interaction.user
+    view = SorteioView(premio, minutos, ganhadores, autor)
+
+    embed = view.gerar_embed()
+    message = await interaction.followup.send(embed=embed, view=view)
+    view.message = message
+
+    await view.iniciar_sorteio()
+
+#=========================================================================================================================================#
 
 @bot.tree.command(name="teste", description="descrição teste")
 async def teste(interaction: discord.Interaction):
