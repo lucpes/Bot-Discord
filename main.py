@@ -86,12 +86,43 @@ async def on_ready():
 
 # Função que verifica se o autor tem o cargo permitido
 
-def check_cargo_permitido(nome_cargo: str):
+def check_cargo_permitido(campo_firebase: str):
     async def predicate(interaction: discord.Interaction):
+        # Permitir se for admin
         if interaction.user.guild_permissions.administrator:
-            return True  # admins sempre podem
-        return any(role.name == nome_cargo for role in interaction.user.roles)
+            return True
+        
+        bot_id = str(interaction.client.user.id)
+        doc_ref = db.collection(bot_id).document("configRegistro")
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            return False  # Sem configuração = acesso negado
+        
+        dados = doc.to_dict()
+        cargo_id = dados.get(campo_firebase)
+
+        if not cargo_id:
+            return False  # Cargo não configurado
+
+        # Verifica se o usuário tem o cargo
+        return any(str(role.id) == str(cargo_id) for role in interaction.user.roles)
+
     return app_commands.check(predicate)
+
+async def obter_cargos_config(guild: discord.Guild):
+    bot_id = str(guild.me.id)
+    doc_ref = db.collection(bot_id).document("configRegistro")
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        return None, None  # Não configurado
+
+    data = doc.to_dict()
+    cargo_membro = guild.get_role(int(data.get("cargo_membro", 0)))
+    cargo_gerente = guild.get_role(int(data.get("cargo_gerente", 0)))
+
+    return cargo_membro, cargo_gerente
 
 #============================================================================================================================================#
 
@@ -154,6 +185,103 @@ async def atualizar_planilha_completa(bot, guild):
 
 #============================================================================================================================================#
 
+# Configurações
+
+@bot.tree.command(name="config_registro", description="Abre o painel de configurações do bot")
+@check_cargo_permitido("cargo_gerente")  # Se você tiver esse verificador
+async def config(interaction: discord.Interaction):
+    bot_id = str(bot.user.id)
+    config = await carregar_configuracoes(bot_id)
+    embed = gerar_embed_config(config)
+    view = ConfigSelectView(bot_id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+def gerar_embed_config(config):
+    embed = discord.Embed(title="⚙️ Configurações do Bot", color=discord.Color.blurple())
+    embed.add_field(name="👤 Cargo de Membro", value=f"<@&{config.get('cargo_membro', '0')}>" if config.get('cargo_membro') else "Não definido", inline=False)
+    embed.add_field(name="🧰 Cargo de Gerente", value=f"<@&{config.get('cargo_gerente', '0')}>" if config.get('cargo_gerente') else "Não definido", inline=False)
+    embed.add_field(name="📝 Canal de Log de Registro", value=f"<#{config.get('canal_log_registro', '0')}>" if config.get('canal_log_registro') else "Não definido", inline=False)
+    embed.add_field(name="🌾 Canal de Log de Farm", value=f"<#{config.get('canal_log_farm', '0')}>" if config.get('canal_log_farm') else "Não definido", inline=False)
+    return embed
+
+class ConfigSelectView(discord.ui.View):
+    def __init__(self, bot_id):
+        super().__init__(timeout=None)
+        self.bot_id = bot_id
+
+    @discord.ui.select(
+        placeholder="Selecione uma configuração para alterar",
+        options=[
+            discord.SelectOption(label="Cargo de Membro", value="cargo_membro"),
+            discord.SelectOption(label="Cargo de Gerente", value="cargo_gerente"),
+            discord.SelectOption(label="Canal de Log de Registro", value="canal_log_registro"),
+            discord.SelectOption(label="Canal de Log de Farm", value="canal_log_farm"),
+        ]
+    )
+    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
+        campo = select.values[0]
+
+        await interaction.response.send_message(
+            f"Por favor, envie o novo ID para `{campo}` (use menção ao cargo/canal).",
+            ephemeral=True
+        )
+
+        def check(m):
+            return m.author == interaction.user and m.channel == interaction.channel
+
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=60)
+            await msg.delete()  # 🧹 Apaga a mensagem enviada pelo usuário
+
+            if campo.startswith("cargo") and msg.role_mentions:
+                novo_id = msg.role_mentions[0].id
+            elif campo.startswith("canal") and msg.channel_mentions:
+                novo_id = msg.channel_mentions[0].id
+            else:
+                await interaction.followup.send("ID inválido. Envie mencionando o cargo ou canal corretamente.", ephemeral=True)
+                return
+
+            salvar_configuracao(self.bot_id, campo, str(novo_id))
+            await interaction.followup.send("✅ Configuração atualizada com sucesso!", ephemeral=True)
+
+        except asyncio.TimeoutError:
+            await interaction.followup.send("⏰ Tempo esgotado. Tente novamente.", ephemeral=True)
+
+# Função de leitura
+async def carregar_configuracoes(bot_id: str):
+    doc_ref = db.collection(bot_id).document("configRegistro")
+    doc = doc_ref.get()
+    if doc.exists:
+        return doc.to_dict()
+    return {}
+
+# Função de escrita
+def salvar_configuracao(bot_id: str, campo: str, valor: str):
+    doc_ref = db.collection(bot_id).document("configRegistro")
+    doc_ref.set({campo: valor}, merge=True)
+    
+
+async def get_config_role_or_channel(interaction: discord.Interaction, campo: str):
+    bot_id = str(interaction.client.user.id)
+    config = await carregar_configuracoes(bot_id)
+    id_str = config.get(campo)
+
+    if not id_str:
+        return None
+
+    try:
+        id_int = int(id_str)
+    except ValueError:
+        return None
+
+    if campo.startswith("cargo"):
+        return interaction.guild.get_role(id_int)
+    elif campo.startswith("canal"):
+        return interaction.client.get_channel(id_int)
+    return None
+
+#============================================================================================================================================#
+
 async def enviar_painel_registro(interaction: Interaction):
     embed_register = Embed(
         title="CENTRAL DE REGISTRO・Chicletões Norte",
@@ -203,7 +331,7 @@ class PaineisView(View):
 
 # Comando principal que chama o seletor de paineis
 @bot.tree.command(name="painel", description="Selecione e envie um painel")
-@check_cargo_permitido("Gerente")
+@check_cargo_permitido("cargo_gerente")
 async def painel_selector(interaction: Interaction):
     view = PaineisView()
     await interaction.response.send_message("Selecione um painel para enviar:", view=view, ephemeral=True)
@@ -253,11 +381,10 @@ class ApproveButton(discord.ui.View):                             # Classe do Bo
         # 🎯 Obter o membro e os cargos
         guild = interaction.guild
         member = guild.get_member(user_id)
-        cargo_aprovado = guild.get_role(1376997518314963084)  # Cargo para membros aprovados
-        cargo_gerente = guild.get_role(1377010279640076368)  # 🚨 Substitua com o ID real do cargo Gerente
+        cargo_membro, cargo_gerente = await obter_cargos_config(guild)
 
-        if not member or not cargo_aprovado:
-            await interaction.response.send_message("<:remove:1377347264963547157> Membro ou cargo não encontrado.", ephemeral=True)
+        if not cargo_membro or not cargo_gerente:
+            await interaction.response.send_message("⚠️ Cargos não configurados corretamente.", ephemeral=True)
             return
 
         # ✅ Extrair nome e ID do embed
@@ -268,7 +395,7 @@ class ApproveButton(discord.ui.View):                             # Classe do Bo
         novo_apelido = f"『M』{nome}・{id_game}"
 
         try:
-            await member.add_roles(cargo_aprovado, reason="Registro aprovado")
+            await member.add_roles(cargo_membro, reason="Registro aprovado")
             await member.edit(nick=novo_apelido, reason="Apelido ajustado após aprovação")
             
             user_ref = db.collection(str(interaction.client.user.id)).document("farms").collection("users").document(str(member.id))
@@ -390,15 +517,12 @@ class RegisterModal(discord.ui.Modal, title="­­  ­­­­­┃𝐅𝐨𝐫𝐦
         embed_approve.timestamp = discord.utils.utcnow()
 
 
-        canal_log_register = 1376933289025208382                # canal que vai enviar o registro
-            
-        # Obter o canal pelo ID
-        canal = interaction.client.get_channel(canal_log_register)
+        canal = await get_config_role_or_channel(interaction, "canal_log_registro")
+
         if canal:
-            # Enviar mensagem pública no canal
             await canal.send(embed=embed_approve, view=ApproveButton())
         else:
-            print(f"Canal com ID {canal_log_register} não encontrado.")
+            await interaction.followup.send("❌ Canal de log de registro não está configurado corretamente.", ephemeral=True)
             
             
 async def send_embed(interaction: discord.Interaction):
@@ -512,8 +636,10 @@ class FarmModal(discord.ui.Modal, title="ㅤㅤㅤ┃ Enviar Farm ┃"):
             await message.delete()
 
             # 1. Cria embed no canal de log de aprovação
-            LOG_CHANNEL_ID = 1377378645219344465
-            log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+            log_channel = await get_config_role_or_channel(interaction, "canal_log_farm")
+            if not log_channel:
+                await interaction.followup.send("❌ Canal de log de farm não está configurado.", ephemeral=True)
+                return
 
             embed_log = discord.Embed(
                 title="📤 **Farm aguardando aprovação**",
@@ -1014,7 +1140,7 @@ class RemoverQuantidadeMembroModal(Modal, title="Remover Farms de um Membro"):
 
 # Comando para criar a lista
 @bot.tree.command(name="lista", description="Cria uma lista personalizada")
-@check_cargo_permitido("Gerente")
+@check_cargo_permitido("cargo_gerente")
 @app_commands.describe(
     nome="Nome da lista",
     quantidade="Número de pessoas que cabem (0 = sem limite)",
@@ -1236,7 +1362,7 @@ class SorteioView(discord.ui.View):
 
 # Comando slash para iniciar sorteio
 @bot.tree.command(name="sorteio", description="Cria um sorteio com prêmio e duração")
-@check_cargo_permitido("Gerente")  # Seu verificador de permissão, se tiver
+@check_cargo_permitido("cargo_gerente")  # Seu verificador de permissão, se tiver
 @app_commands.describe(
     premio="Prêmio do sorteio",
     minutos="Duração em minutos",

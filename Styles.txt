@@ -18,21 +18,3 @@ Espaço vazio " "-"ㅤ"-"ㅤㅤ"
 
 "user_id": interaction.user.id,
 
-
-
-#============================================================================================================================================#
-
-# Configurações
-
-
-# Função de leitura
-async def carregar_configuracoes(bot_id: str):
-    doc_ref = db.collection("bots").document(bot_id).collection("configuracoes").document("geral")
-    doc = doc_ref.get()
-    if doc.exists:
-        return doc.to_dict()
-    return {}
-
-async def salvar_configuracao(bot_id: str, campo: str, valor: str):
-    doc_ref = db.collection("bots").document(bot_id).collection("configuracoes").document("geral")
-    await doc_ref.set({campo: valor}, merge=True)
